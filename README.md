@@ -1,5 +1,4 @@
-# PowerLadon
-Ladon NetScan For PowerShell
+# Ladon NetScan For PowerShell
 ![](https://k8gege.github.io/k8img/Ladon/Dragon.jpg)
 
 [![Author](https://img.shields.io/badge/Author-k8gege-blueviolet)](https://github.com/k8gege) 
