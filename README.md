@@ -1,13 +1,14 @@
-## Ladon 7.0 for PowerShell
+## Ladon 911 for PowerShell
 ![](https://k8gege.github.io/k8img/Ladon/Dragon.jpg)
 
 [![Author](https://img.shields.io/badge/Author-k8gege-blueviolet)](https://github.com/k8gege) 
-[![Ladon](https://img.shields.io/badge/Ladon-7.0-yellowgreen)](https://github.com/k8gege/Ladon) 
-[![Bin](https://img.shields.io/badge/Ladon-Bin-ff69b4)](https://github.com/k8gege/Ladon/releases) 
-[![GitHub issues](https://img.shields.io/github/issues/k8gege/Ladon)](https://github.com/k8gege/Ladon/issues) 
-[![Github Stars](https://img.shields.io/github/stars/k8gege/Ladon)](https://github.com/k8gege/Ladon) 
-[![GitHub forks](https://img.shields.io/github/forks/k8gege/Ladon)](https://github.com/k8gege/Ladon)
-[![GitHub license](https://img.shields.io/github/license/k8gege/Ladon)](https://github.com/k8gege/Ladon)
+[![Ladon](https://img.shields.io/badge/PowerLadon-911-yellowgreen)](https://github.com/k8gege/PowerLadon) 
+[![Bin](https://img.shields.io/badge/PowerLadon-Bin-ff69b4)](https://github.com/k8gege/PowerLadon/releases) 
+[![GitHub issues](https://img.shields.io/github/issues/k8gege/PowerLadon)](https://github.com/k8gege/PowerLadon/issues) 
+[![Github Stars](https://img.shields.io/github/stars/k8gege/PowerLadon)](https://github.com/k8gege/PowerLadon) 
+[![GitHub forks](https://img.shields.io/github/forks/k8gege/PowerLadon)](https://github.com/k8gege/PowerLadon)
+[![GitHub license](https://img.shields.io/github/license/k8gege/PowerLadon)](https://github.com/k8gege/PowerLadon)
+[![Downloads](https://img.shields.io/github/downloads/k8gege/PowerLadon/total?label=Release%20Download)](https://github.com/k8gege/PowerLadon/releases/latest)
 
 
 ### Ladon
