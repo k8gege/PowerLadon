@@ -377,3 +377,9 @@ https://github.com/k8gege/Ladon/raw/master/Moudle_Demo.rar
 ### 注本页面的教程并不是很全，详情请看WIKI,我会慢慢完善
 
 #### [Top](#readme)
+
+## Stargazers over time
+
+[![Stargazers over time](https://starchart.cc/k8gege/PowerLadon.svg)](https://starchart.cc/k8gege/PowerLadon)
+
+<img align='right' src="https://profile-counter.glitch.me/PowerLadon/count.svg" width="200">
