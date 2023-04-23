@@ -16,12 +16,48 @@ Ladon35			Win7/2008或装有.NET 3.x系统下使用 安装有4.8的建议优先L
 Ladon.ps1		Win7-Win2022或装有PowerShell系统，可远程内存加载无文件渗透
 NimLadon		Nim免杀Ladon，可过部分杀软，可用net2nim工具 自行转换
 
-script目录		CS插件，一键使用，内存加载，无需将EXE上传目标，无文件渗透
+LadonCS			CS插件,一键使用，内存加载，无需将EXE上传目标，无文件渗透
 	
 LadonGUI		辅助工具，含免杀、文本处理、加密解密、反弹Shell、子域名等
 LadonEXP		EXP生成器，一键生成Poc、EXP，快速扩展Ladon批量GetShell能力
 LadonStudy		学习模式，一键渗透，对Ladon不熟的人，也可快速实战GetShell
 ChatLadon		渗透机器人，也可当成学习模式，只要会聊天，就能让Ladon干活
+=========================================================================
+
+
+Ladon 10.10.4  20230422
+[u]LadonGUI			文本处理，功能全改成中文(Win8及以上英文系统支持中文)
+[+]EXP-2022-36537	Zookeeper 未授权文件读取EXP (默认/WEB-INF/web.xml)
+[+]CVE-2022-36537	Server Backup Manager 未授权RCE漏洞检测 (Zookeeper)
+[+]INI插件		   	超时30秒，自动结束进程，防批量PY卡死
+[+]TXT文件		   	IP、URL等自动去重，只有str.txt不去重
+[+]TXT文件		   	扫描TXT支持自定义线程数，不再默认100
+[u]SshScan  		修复ip.txt时重复扫N多密码的Bug
+[+]PortForward		端口转发 
+[+]默认信息			显示OS版本识别小版本号、.NET最高版本
+[+]INI插件		   	支持$ip$、$url$、$tar$、$ip$:$port$、$ip$ $port$参数，自动处理格式，如tar.txt中有IP和URL，$ip$会把url处理成IP
+[+]INI插件		   	支持参数处理，如INI里配置$ip$，读取tar.txt内容为http://192.168.1.8:8099，内容将处理成IP数据192.168.1.8，其他同理
+[+]TXT文件		   	新增tar.txt、target.txt一样，传入参数为原始内容，如提供的是IP，Ladon不会处理成url，除非INI里指定，或模块自行处理
+[+]TXT文件		   	修复读取url.txt host.txt 出现不完整问题，如http://backup.xxx.org 变成 http:ckup.xx.org 的Bug
+
+
+=========================================
+Ladon 10.10.3 20230410
+[+]FtpServer	迷你FTP服务器，(支持windows/Linux自带ftp命令实现文件上传下载) 
+				默认21 admin admin 可自定义端口  自定义用户、密码
+[+]TcpServer	监听TCP发包数据 保存TXT和HEX 如SMB RDP HTTP SSH LDAP FTP等协议 
+[+]UdpServer	监听UDP发包数据 保存TXT和HEX 如DNS、SNMP等协议
+[+]ArpInfo		ARP协议探测存活主机IP和MAC，仅支持同一子网
+[u]WebServer	迷你WEB服务器
+[u]PortScan		移除9100端口
+
+Ladon 10.10.2 20230402
+[+]clsLog	  	清除崩溃日志、UsageLog日志、清除图标缓存、禁止UsageLog日志记录
+[u]默认禁止基于.net程序UsageLog日志记录(如各类工具、powershell等)防止蓝队或EDR通过日志审计
+[u]RunPS 	  	无PowerShell.exe执行*.ps1脚本 新增内存绕过AMSI反病毒查杀接口
+[+]默认Bypass 	ETW 绕过部分杀软和EDR监控
+[+]HPreboot    	SNMP重启HP打印机 .net>=4.0
+
 
 Ladon 10.10 20230318
 ============================================================================
