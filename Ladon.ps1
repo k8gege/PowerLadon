@@ -48,8 +48,11 @@ powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon OnlinePC
 powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon PortScan '22,80,135,445'
 
 0x006 Auto scan (detect local segment, run OnlinePC/OsScan/PortScan/WebScan/MS17010, save report)
+Knocks every live host with the recommended sequence (7000,8000,9000) after host discovery.
 powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto
 powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto 192.168.1.8/24
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto 192.168.1.8/24 noknock
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto 192.168.1.8/24 knock=7001,7002,7003
 
 0x007 Port knocking (send a TCP/UDP knock sequence, e.g. to open a knockd firewall)
 powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --knock 192.168.1.8 7000,8000,9000
@@ -184,6 +187,76 @@ function Invoke-LadonCaptured([string[]]$margs)
 # Ladon modules whose bare one-argument form means "scan the current C-segment".
 $LadonSegmentModules = @('onlinepc','onlineip','osscan','portscan','webscan','ciscosan','ciscoscan','enummssql','enumshare','ms17010','smbghost','weblogicpoc','phpstudypoc','activemqpoc','tomcatpoc','struts2poc','hikvisionscan','hikvisionpoc','draytekpoc','draytekscan','drvrscan','exchangescan','wpscan','telnetscan','ztescan','dvrscan','wmiscan','ipcscan','smbscan','smbhash','sshscan','mssqlscan','oraclescan','mysqlscan','weblogicscan','vncscan','ftpscan','tomcatscan','httpbasicscan','ldapscan','nbtscan','winrmscan','wmihash','snmpinfo','smbinfo','wmiinfo','rdpinfo','mssqlinfo','winrminfo','exchangeinfo','nbtinfo','dnsinfo','arpscan','infoscan','allscan','expscan','vulnscan')
 
+# ======================== port knocking helpers ========================
+# Recommended knock sequence (canonical knockd example) used by --auto.
+$LadonRecommendedKnock = '7000,8000,9000'
+
+# Parses a knock spec ("u:7000,t:8000,9000" or an array from bare 7000,8000)
+# into an array of @(proto, port) items; returns $null on invalid input.
+function ConvertFrom-LadonKnockSpec($spec)
+{
+	$items = @()
+	$tokens = @()
+	foreach ($p0 in @($spec)) { $tokens += @("$p0" -split ',') }
+	foreach ($tok0 in $tokens)
+	{
+		$tok = "$tok0".Trim()
+		if ($tok -eq '') { continue }
+		$proto = 'tcp'
+		if ($tok -match '^(?i)(u|udp):(.*)$') { $proto = 'udp'; $tok = $Matches[2] }
+		elseif ($tok -match '^(?i)(t|tcp):(.*)$') { $proto = 'tcp'; $tok = $Matches[2] }
+		if ($tok -notmatch '^\d+$' -or [int]$tok -lt 1 -or [int]$tok -gt 65535) { return $null }
+		$items += ,@($proto, [int]$tok)
+	}
+	if ($items.Count -eq 0) { return $null }
+	return $items
+}
+
+# Sends a single knock step and returns a human-readable status.
+function Send-LadonKnockStep($ip, $proto, $port, $timeoutMs)
+{
+	if ($proto -eq 'udp')
+	{
+		try
+		{
+			$udp = New-Object System.Net.Sockets.UdpClient
+			$udp.Connect($ip, $port)
+			$payload = [byte[]]@(0x4B)
+			[void]$udp.Send($payload, $payload.Length)
+			$udp.Close()
+			return 'datagram sent'
+		}
+		catch { return 'ERROR: ' + $_.Exception.Message }
+	}
+	$client = New-Object System.Net.Sockets.TcpClient
+	try
+	{
+		$iar = $client.BeginConnect($ip, $port, $null, $null)
+		if ($iar.AsyncWaitHandle.WaitOne($timeoutMs, $false))
+		{
+			try { $client.EndConnect($iar); return 'connected (port open)' }
+			catch { return 'closed (RST - knock sent)' }
+		}
+		return 'timeout (filtered - knock sent)'
+	}
+	catch { return 'ERROR: ' + $_.Exception.Message }
+	finally { $client.Close() }
+}
+
+# Extracts unique live host IPs from OnlinePC-style scan output lines.
+function Get-LadonHostsFromScanOutput($text)
+{
+	$hosts = @{}
+	foreach ($ln in ($text -split "`r?`n"))
+	{
+		if ($ln -match '^\s*(?:ICMP|MAC|DNS|SMB|WMI|MSSQL|SQL|EXCHANGE|WINRM|NBT)\s*:\s*(\d{1,3}(?:\.\d{1,3}){3})\b')
+		{
+			$hosts[$Matches[1]] = $true
+		}
+	}
+	return @($hosts.Keys | Sort-Object { [System.Version]$_ })
+}
+
 # --auto: full information-gathering sequence + report
 if ($Q7MGIzea -ieq '--auto' -or $Q7MGIzea -ieq '-auto')
 {
@@ -196,6 +269,29 @@ if ($Q7MGIzea -ieq '--auto' -or $Q7MGIzea -ieq '-auto')
 		return
 	}
 	$autoStages = @('OnlinePC','OsScan','PortScan','WebScan','MS17010')
+	# Knock phase options (3rd argument): default = recommended sequence on
+	# every live host found by OnlinePC, before the scan stages run.
+	#   noknock          -> disable knocking
+	#   knock=<spec>     -> custom sequence, e.g. knock=7001,7002 or knock=u:9,t:445
+	$autoKnockItems = $null
+	$knockOpt = (@($z8kaB) -join ',').Trim()
+	if ($knockOpt -ieq 'noknock')
+	{
+		$autoKnockItems = $null
+	}
+	elseif ($knockOpt -match '^(?i)knock=(.*)$')
+	{
+		$autoKnockItems = ConvertFrom-LadonKnockSpec $Matches[1]
+		if ($null -eq $autoKnockItems)
+		{
+			Write-Host "[!] --auto: invalid knock sequence '$($Matches[1])' - knock phase disabled"
+			$autoKnockItems = $null
+		}
+	}
+	else
+	{
+		$autoKnockItems = ConvertFrom-LadonKnockSpec $LadonRecommendedKnock
+	}
 	$reportDir = Join-Path (Get-Location) 'Ladon-Reports'
 	if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Path $reportDir | Out-Null }
 	$safeTarget = ($autoTarget -replace '[/:\\]', '_')
@@ -217,6 +313,55 @@ if ($Q7MGIzea -ieq '--auto' -or $Q7MGIzea -ieq '-auto')
 		$section = "########## [$($si + 1)/$($autoStages.Count)] $stage  ($autoTarget)  started $($stageStart.ToString('HH:mm:ss'))  ${stageSecs}s  ${resultLines} result lines ##########`n$out`n`n"
 		[IO.File]::AppendAllText($reportPath, $section)
 		Write-Host ("[--auto] [{0}/{1}] {2} done in {3}s ({4} result lines)" -f ($si + 1), $autoStages.Count, $stage, $stageSecs, $resultLines)
+		# Knock phase: after host discovery, knock every live host with the
+		# recommended sequence so knockd-style firewalls open before the
+		# port-scan stages see them.
+		if ($stage -ieq 'OnlinePC' -and $null -ne $autoKnockItems)
+		{
+			$liveHosts = Get-LadonHostsFromScanOutput $out
+			$knockPlan = ($autoKnockItems | ForEach-Object { $_[0] + ':' + $_[1] }) -join ','
+			$kStart = Get-Date
+			$kDelay = 50
+			$kTimeout = 400
+			$kLimit = 128
+			Write-Host ("[--auto] [Knock] {0} live host(s), sequence [{1}] (delay {2}ms, timeout {3}ms)" -f $liveHosts.Count, $knockPlan, $kDelay, $kTimeout)
+			$hostLines = @()
+			$knocked = 0
+			foreach ($h in $liveHosts)
+			{
+				if ($knocked -ge $kLimit)
+				{
+					$hostLines += "... truncated at $kLimit hosts ..."
+					Write-Host "[--auto] [Knock] host limit ($kLimit) reached, remaining hosts skipped"
+					break
+				}
+				$hip = $null
+				try { $hip = [System.Net.IPAddress]::Parse($h) } catch { continue }
+				$stOpen = @(); $stClosed = 0; $stTo = 0; $stErr = 0
+				for ($ki = 0; $ki -lt $autoKnockItems.Count; $ki++)
+				{
+					$st = Send-LadonKnockStep $hip $autoKnockItems[$ki][0] $autoKnockItems[$ki][1] $kTimeout
+					if ($st -like 'connected*') { $stOpen += ($autoKnockItems[$ki][0] + ':' + $autoKnockItems[$ki][1]) }
+					elseif ($st -like 'closed*') { $stClosed++ }
+					elseif ($st -like 'timeout*') { $stTo++ }
+					else { $stErr++ }
+					if ($ki -lt $autoKnockItems.Count - 1) { Start-Sleep -Milliseconds $kDelay }
+				}
+				$parts = @()
+				if ($stClosed) { $parts += "$stClosed closed" }
+				if ($stTo) { $parts += "$stTo timeout" }
+				if ($stErr) { $parts += "$stErr error" }
+				$ksum = "$h  knock sent x$($autoKnockItems.Count)"
+				if ($parts.Count) { $ksum += " (" + ($parts -join ', ') + ")" }
+				if ($stOpen.Count) { $ksum += "  *** OPEN: " + ($stOpen -join ',') + " ***" }
+				$hostLines += $ksum
+				$knocked++
+				Write-Host ("[--auto] [Knock] [{0}/{1}] {2}" -f $knocked, $liveHosts.Count, $ksum)
+			}
+			$kSecs = [int]((Get-Date) - $kStart).TotalSeconds
+			$kHeader = "########## [Knock]  sequence=[$knockPlan]  hosts=$knocked/$($liveHosts.Count)  started $($kStart.ToString('HH:mm:ss'))  ${kSecs}s ##########`n"
+			[IO.File]::AppendAllText($reportPath, $kHeader + ($hostLines -join "`n") + "`n`n")
+		}
 	}
 	$totalSecs = [int]((Get-Date) - $autoStart).TotalSeconds
 	[IO.File]::AppendAllText($reportPath, "=======================`nFinished    : " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "`nTotal time  : ${totalSecs}s`n")
@@ -261,64 +406,19 @@ if ($Q7MGIzea -ieq '--knock' -or $Q7MGIzea -ieq '--portknock')
 		Write-Host "[!] --knock: could not resolve '$z9cZmQB'"
 		return
 	}
-	$knockItems = @()
-	$knockBad = $false
-	# $z8kaB may arrive as a comma-array (PowerShell parses 1,2,3 into an
-	# object array at the command line) or as a single comma string - accept both.
-	$knockTokens = @()
-	foreach ($p0 in @($z8kaB)) { $knockTokens += @($p0 -split ',') }
-	foreach ($tok0 in $knockTokens)
+	$knockItems = ConvertFrom-LadonKnockSpec $z8kaB
+	if ($null -eq $knockItems)
 	{
-		$tok = "$tok0".Trim()
-		if ($tok -eq '') { continue }
-		$proto = 'tcp'
-		if ($tok -match '^(?i)(u|udp):(.*)$') { $proto = 'udp'; $tok = $Matches[2] }
-		elseif ($tok -match '^(?i)(t|tcp):(.*)$') { $proto = 'tcp'; $tok = $Matches[2] }
-		if ($tok -notmatch '^\d+$' -or [int]$tok -lt 1 -or [int]$tok -gt 65535)
-		{
-			Write-Host "[!] --knock: invalid port '$tok'"
-			$knockBad = $true
-			break
-		}
-		$knockItems += ,@($proto, [int]$tok)
+		Write-Host "[!] --knock: invalid port list '$z8kaB'"
+		return
 	}
-	if ($knockBad -or $knockItems.Count -eq 0) { return }
 	$knockPlan = ($knockItems | ForEach-Object { $_[0] + ':' + $_[1] }) -join ','
 	Write-Host ("[*] Knocking {0} ({1})  sequence=[{2}]  delay={3}ms  timeout={4}ms" -f $z9cZmQB, $knockIp, $knockPlan, $knockDelay, $knockTimeout)
 	for ($ki = 0; $ki -lt $knockItems.Count; $ki++)
 	{
 		$proto = $knockItems[$ki][0]
 		$port = $knockItems[$ki][1]
-		$status = ''
-		if ($proto -eq 'udp')
-		{
-			try
-			{
-				$udp = New-Object System.Net.Sockets.UdpClient
-				$udp.Connect($knockIp, $port)
-				$payload = [byte[]]@(0x4B)
-				[void]$udp.Send($payload, $payload.Length)
-				$udp.Close()
-				$status = 'datagram sent'
-			}
-			catch { $status = 'ERROR: ' + $_.Exception.Message }
-		}
-		else
-		{
-			$client = New-Object System.Net.Sockets.TcpClient
-			try
-			{
-				$iar = $client.BeginConnect($knockIp, $port, $null, $null)
-				if ($iar.AsyncWaitHandle.WaitOne($knockTimeout, $false))
-				{
-					try { $client.EndConnect($iar); $status = 'connected (port open)' }
-					catch { $status = 'closed (RST - knock sent)' }
-				}
-				else { $status = 'timeout (filtered - knock sent)' }
-			}
-			catch { $status = 'ERROR: ' + $_.Exception.Message }
-			$client.Close()
-		}
+		$status = Send-LadonKnockStep $knockIp $proto $port $knockTimeout
 		Write-Host ("[{0}/{1}] {2} {3}:{4}  -> {5}" -f ($ki + 1), $knockItems.Count, $proto, $knockIp, $port, $status)
 		if ($ki -lt $knockItems.Count - 1) { Start-Sleep -Milliseconds $knockDelay }
 	}
