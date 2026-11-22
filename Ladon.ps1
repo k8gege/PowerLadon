@@ -51,6 +51,10 @@ powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon PortScan '22,
 powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto
 powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto 192.168.1.8/24
 
+0x007 Port knocking (send a TCP/UDP knock sequence, e.g. to open a knockd firewall)
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --knock 192.168.1.8 7000,8000,9000
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --knock 192.168.1.8 u:7000,t:8000,t:9000 200 1500
+
 Note: on Windows 11 systems where the built-in "current C-segment" detection fails
 (bare "Ladon OnlinePC" prints "Exception has been thrown by the target of an invocation"),
 the wrapper auto-resolves the local IPv4 segment and passes it explicitly.
@@ -218,6 +222,107 @@ if ($Q7MGIzea -ieq '--auto' -or $Q7MGIzea -ieq '-auto')
 	[IO.File]::AppendAllText($reportPath, "=======================`nFinished    : " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "`nTotal time  : ${totalSecs}s`n")
 	Write-Host ""
 	Write-Host "[--auto] Report written to: $reportPath"
+	return
+}
+
+# --knock: port knocking client. Sends a sequence of TCP connects / UDP
+# datagrams to a target (e.g. to trigger a knockd-style firewall opening).
+# Usage: Ladon --knock <ip|host> <port[,port,...]> [delayMs] [timeoutMs]
+#   Per-port protocol prefix u:/udp: or t:/tcp: (default tcp).
+#   e.g.: Ladon --knock 192.168.1.8 7000,8000,9000
+#         Ladon --knock 192.168.1.8 u:7000,t:8000,t:9000 200 1500
+if ($Q7MGIzea -ieq '--knock' -or $Q7MGIzea -ieq '--portknock')
+{
+	if ([String]::IsNullOrEmpty($z9cZmQB) -or [String]::IsNullOrEmpty($z8kaB))
+	{
+		Write-Host "Usage: Ladon --knock <ip|host> <port[,port,...]> [delayMs] [timeoutMs]"
+		Write-Host "       per-port prefix u:/t: selects udp/tcp (default tcp)"
+		Write-Host "       e.g.: Ladon --knock 192.168.1.8 7000,8000,9000"
+		Write-Host "             Ladon --knock 192.168.1.8 u:7000,t:8000,t:9000 200 1500"
+		return
+	}
+	$knockDelay = 200
+	$knockTimeout = 1500
+	if ($Kjeb3g -match '^\d+$') { $knockDelay = [int]$Kjeb3g }
+	if ($z8vie -match '^\d+$') { $knockTimeout = [int]$z8vie }
+	$knockIp = $null
+	try
+	{
+		$resolved = [System.Net.Dns]::GetHostAddresses($z9cZmQB)
+		foreach ($a in $resolved)
+		{
+			if ($a.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { $knockIp = $a; break }
+		}
+		if ($null -eq $knockIp -and $resolved.Count -gt 0) { $knockIp = $resolved[0] }
+	}
+	catch { }
+	if ($null -eq $knockIp)
+	{
+		Write-Host "[!] --knock: could not resolve '$z9cZmQB'"
+		return
+	}
+	$knockItems = @()
+	$knockBad = $false
+	# $z8kaB may arrive as a comma-array (PowerShell parses 1,2,3 into an
+	# object array at the command line) or as a single comma string - accept both.
+	$knockTokens = @()
+	foreach ($p0 in @($z8kaB)) { $knockTokens += @($p0 -split ',') }
+	foreach ($tok0 in $knockTokens)
+	{
+		$tok = "$tok0".Trim()
+		if ($tok -eq '') { continue }
+		$proto = 'tcp'
+		if ($tok -match '^(?i)(u|udp):(.*)$') { $proto = 'udp'; $tok = $Matches[2] }
+		elseif ($tok -match '^(?i)(t|tcp):(.*)$') { $proto = 'tcp'; $tok = $Matches[2] }
+		if ($tok -notmatch '^\d+$' -or [int]$tok -lt 1 -or [int]$tok -gt 65535)
+		{
+			Write-Host "[!] --knock: invalid port '$tok'"
+			$knockBad = $true
+			break
+		}
+		$knockItems += ,@($proto, [int]$tok)
+	}
+	if ($knockBad -or $knockItems.Count -eq 0) { return }
+	$knockPlan = ($knockItems | ForEach-Object { $_[0] + ':' + $_[1] }) -join ','
+	Write-Host ("[*] Knocking {0} ({1})  sequence=[{2}]  delay={3}ms  timeout={4}ms" -f $z9cZmQB, $knockIp, $knockPlan, $knockDelay, $knockTimeout)
+	for ($ki = 0; $ki -lt $knockItems.Count; $ki++)
+	{
+		$proto = $knockItems[$ki][0]
+		$port = $knockItems[$ki][1]
+		$status = ''
+		if ($proto -eq 'udp')
+		{
+			try
+			{
+				$udp = New-Object System.Net.Sockets.UdpClient
+				$udp.Connect($knockIp, $port)
+				$payload = [byte[]]@(0x4B)
+				[void]$udp.Send($payload, $payload.Length)
+				$udp.Close()
+				$status = 'datagram sent'
+			}
+			catch { $status = 'ERROR: ' + $_.Exception.Message }
+		}
+		else
+		{
+			$client = New-Object System.Net.Sockets.TcpClient
+			try
+			{
+				$iar = $client.BeginConnect($knockIp, $port, $null, $null)
+				if ($iar.AsyncWaitHandle.WaitOne($knockTimeout, $false))
+				{
+					try { $client.EndConnect($iar); $status = 'connected (port open)' }
+					catch { $status = 'closed (RST - knock sent)' }
+				}
+				else { $status = 'timeout (filtered - knock sent)' }
+			}
+			catch { $status = 'ERROR: ' + $_.Exception.Message }
+			$client.Close()
+		}
+		Write-Host ("[{0}/{1}] {2} {3}:{4}  -> {5}" -f ($ki + 1), $knockItems.Count, $proto, $knockIp, $port, $status)
+		if ($ki -lt $knockItems.Count - 1) { Start-Sleep -Milliseconds $knockDelay }
+	}
+	Write-Host "[*] Knock sequence complete."
 	return
 }
 
