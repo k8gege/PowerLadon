@@ -47,6 +47,21 @@ powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon OnlinePC
 0x005 Diy PortScan
 powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon PortScan '22,80,135,445'
 
+0x006 Auto scan (detect local segment, run OnlinePC/OsScan/PortScan/WebScan/MS17010, save report)
+Knocks every live host with the recommended sequence (7000,8000,9000) after host discovery.
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto 192.168.1.8/24
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto 192.168.1.8/24 noknock
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --auto 192.168.1.8/24 knock=7001,7002,7003
+
+0x007 Port knocking (send a TCP/UDP knock sequence, e.g. to open a knockd firewall)
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --knock 192.168.1.8 7000,8000,9000
+powershell -ExecutionPolicy Bypass Import-Module .\Ladon.ps1;Ladon --knock 192.168.1.8 u:7000,t:8000,t:9000 200 1500
+
+Note: on Windows 11 systems where the built-in "current C-segment" detection fails
+(bare "Ladon OnlinePC" prints "Exception has been thrown by the target of an invocation"),
+the wrapper auto-resolves the local IPv4 segment and passes it explicitly.
+
 
 #>
 Param      
@@ -99,5 +114,344 @@ $hk3kd.Read($AzdsZ, 0, 3512168) | Out-Null
 $b8ujk = "TG"+"9k"+"YW4"+"uU"+"2N"+"h"+"bg=="
 $d3gsd = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b8ujk))
 $Kb82F = [Reflection.Assembly]::Load($AzdsZ).GetType($d3gsd)
+
+# ======================== wrapper-level enhancements ========================
+# 1) Robust local segment detection: on some Windows 11 builds (e.g. Insider
+#    26340) GetAllNetworkInterfaces() lists disconnected adapters first and
+#    every adapter lists IPv6 addresses before IPv4. Ladon's built-in
+#    auto-CIDR detection then fails internally (bare "Ladon OnlinePC" prints
+#    "Exception has been thrown by the target of an invocation"). This helper
+#    picks the first Up, non-loopback adapter that has a real IPv4 address
+#    (APIPA and link-local/IPv6 entries are skipped) and returns ip/prefix.
+# 2) "--auto" mode: run the standard information-gathering sequence against a
+#    target (or the detected local segment) and write a timestamped report.
+function Get-LadonLocalCidr
+{
+	$apipaEntries = @()
+	$otherEntries = @()
+	try
+	{
+		foreach ($ni in [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces())
+		{
+			try
+			{
+				if ($ni.NetworkInterfaceType -eq [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback) { continue }
+				$v4 = $null
+				foreach ($ua in $ni.GetIPProperties().UnicastAddresses)
+				{
+					if ($ua.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { $v4 = $ua; break }
+				}
+				if ($null -eq $v4) { continue }
+				$ip = $v4.Address.ToString()
+				$prefix = -1
+				try { $prefix = [int]$v4.PrefixLength }
+				catch
+				{
+					try
+					{
+						$bits = 0
+						foreach ($b in $v4.IPv4Mask.GetAddressBytes()) { for ($k = 7; $k -ge 0; $k--) { if ($b -band (1 -shl $k)) { $bits++ } } }
+						$prefix = $bits
+					}
+					catch { $prefix = -1 }
+				}
+				if ($prefix -lt 0 -or $prefix -gt 32) { $prefix = 24 }
+				$entry = "$ip/$prefix"
+				if ($ni.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up)
+				{
+					if ($ip.StartsWith('169.254.')) { $apipaEntries += $entry } else { return $entry }
+				}
+				else { $otherEntries += $entry }
+			}
+			catch { continue }
+		}
+	}
+	catch { return $null }
+	if ($apipaEntries.Count -gt 0) { return $apipaEntries[0] }
+	if ($otherEntries.Count -gt 0) { return $otherEntries[0] }
+	return $null
+}
+
+# Runs Lodan.Scan.Main with the given args while capturing its console output.
+function Invoke-LadonCaptured([string[]]$margs)
+{
+	$sw = New-Object System.IO.StringWriter
+	$oldOut = [Console]::Out
+	$captured = $false
+	try { [Console]::SetOut($sw); $captured = $true } catch { }
+	try { $Kb82F::Main($margs) } finally { if ($captured) { [Console]::SetOut($oldOut) } }
+	if ($captured) { return $sw.ToString() }
+	return "(console output capture unavailable; this stage wrote directly to the console)"
+}
+
+# Ladon modules whose bare one-argument form means "scan the current C-segment".
+$LadonSegmentModules = @('onlinepc','onlineip','osscan','portscan','webscan','ciscosan','ciscoscan','enummssql','enumshare','ms17010','smbghost','weblogicpoc','phpstudypoc','activemqpoc','tomcatpoc','struts2poc','hikvisionscan','hikvisionpoc','draytekpoc','draytekscan','drvrscan','exchangescan','wpscan','telnetscan','ztescan','dvrscan','wmiscan','ipcscan','smbscan','smbhash','sshscan','mssqlscan','oraclescan','mysqlscan','weblogicscan','vncscan','ftpscan','tomcatscan','httpbasicscan','ldapscan','nbtscan','winrmscan','wmihash','snmpinfo','smbinfo','wmiinfo','rdpinfo','mssqlinfo','winrminfo','exchangeinfo','nbtinfo','dnsinfo','arpscan','infoscan','allscan','expscan','vulnscan')
+
+# ======================== port knocking helpers ========================
+# Recommended knock sequence (canonical knockd example) used by --auto.
+$LadonRecommendedKnock = '7000,8000,9000'
+
+# Parses a knock spec ("u:7000,t:8000,9000" or an array from bare 7000,8000)
+# into an array of @(proto, port) items; returns $null on invalid input.
+function ConvertFrom-LadonKnockSpec($spec)
+{
+	$items = @()
+	$tokens = @()
+	foreach ($p0 in @($spec)) { $tokens += @("$p0" -split ',') }
+	foreach ($tok0 in $tokens)
+	{
+		$tok = "$tok0".Trim()
+		if ($tok -eq '') { continue }
+		$proto = 'tcp'
+		if ($tok -match '^(?i)(u|udp):(.*)$') { $proto = 'udp'; $tok = $Matches[2] }
+		elseif ($tok -match '^(?i)(t|tcp):(.*)$') { $proto = 'tcp'; $tok = $Matches[2] }
+		if ($tok -notmatch '^\d+$' -or [int]$tok -lt 1 -or [int]$tok -gt 65535) { return $null }
+		$items += ,@($proto, [int]$tok)
+	}
+	if ($items.Count -eq 0) { return $null }
+	return $items
+}
+
+# Sends a single knock step and returns a human-readable status.
+function Send-LadonKnockStep($ip, $proto, $port, $timeoutMs)
+{
+	if ($proto -eq 'udp')
+	{
+		try
+		{
+			$udp = New-Object System.Net.Sockets.UdpClient
+			$udp.Connect($ip, $port)
+			$payload = [byte[]]@(0x4B)
+			[void]$udp.Send($payload, $payload.Length)
+			$udp.Close()
+			return 'datagram sent'
+		}
+		catch { return 'ERROR: ' + $_.Exception.Message }
+	}
+	$client = New-Object System.Net.Sockets.TcpClient
+	try
+	{
+		$iar = $client.BeginConnect($ip, $port, $null, $null)
+		if ($iar.AsyncWaitHandle.WaitOne($timeoutMs, $false))
+		{
+			try { $client.EndConnect($iar); return 'connected (port open)' }
+			catch { return 'closed (RST - knock sent)' }
+		}
+		return 'timeout (filtered - knock sent)'
+	}
+	catch { return 'ERROR: ' + $_.Exception.Message }
+	finally { $client.Close() }
+}
+
+# Extracts unique live host IPs from OnlinePC-style scan output lines.
+function Get-LadonHostsFromScanOutput($text)
+{
+	$hosts = @{}
+	foreach ($ln in ($text -split "`r?`n"))
+	{
+		if ($ln -match '^\s*(?:ICMP|MAC|DNS|SMB|WMI|MSSQL|SQL|EXCHANGE|WINRM|NBT)\s*:\s*(\d{1,3}(?:\.\d{1,3}){3})\b')
+		{
+			$hosts[$Matches[1]] = $true
+		}
+	}
+	return @($hosts.Keys | Sort-Object { [System.Version]$_ })
+}
+
+# --auto: full information-gathering sequence + report
+if ($Q7MGIzea -ieq '--auto' -or $Q7MGIzea -ieq '-auto')
+{
+	$autoTarget = $z9cZmQB
+	if ([String]::IsNullOrEmpty($autoTarget)) { $autoTarget = Get-LadonLocalCidr }
+	if ([String]::IsNullOrEmpty($autoTarget))
+	{
+		Write-Host "[!] --auto: could not detect a local IPv4 segment."
+		Write-Host "    Usage: Ladon --auto [ip/prefix]   e.g. Ladon --auto 192.168.1.8/24"
+		return
+	}
+	$autoStages = @('OnlinePC','OsScan','PortScan','WebScan','MS17010')
+	# Knock phase options (3rd argument): default = recommended sequence on
+	# every live host found by OnlinePC, before the scan stages run.
+	#   noknock          -> disable knocking
+	#   knock=<spec>     -> custom sequence, e.g. knock=7001,7002 or knock=u:9,t:445
+	$autoKnockItems = $null
+	$knockOpt = (@($z8kaB) -join ',').Trim()
+	if ($knockOpt -ieq 'noknock')
+	{
+		$autoKnockItems = $null
+	}
+	elseif ($knockOpt -match '^(?i)knock=(.*)$')
+	{
+		$autoKnockItems = ConvertFrom-LadonKnockSpec $Matches[1]
+		if ($null -eq $autoKnockItems)
+		{
+			Write-Host "[!] --auto: invalid knock sequence '$($Matches[1])' - knock phase disabled"
+			$autoKnockItems = $null
+		}
+	}
+	else
+	{
+		$autoKnockItems = ConvertFrom-LadonKnockSpec $LadonRecommendedKnock
+	}
+	$reportDir = Join-Path (Get-Location) 'Ladon-Reports'
+	if (-not (Test-Path $reportDir)) { New-Item -ItemType Directory -Path $reportDir | Out-Null }
+	$safeTarget = ($autoTarget -replace '[/:\\]', '_')
+	$reportPath = Join-Path $reportDir ("Ladon-Report-" + $safeTarget + "-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + ".txt")
+	$header = "Ladon --auto scan report`n=======================`nTarget      : $autoTarget`nStarted     : " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "`nRun by      : $env:USERDOMAIN\$env:USERNAME on $env:COMPUTERNAME`nStages      : " + ($autoStages -join ' -> ') + "`n`n"
+	# The report is written incrementally so an interrupted run still leaves
+	# a usable partial report on disk.
+	[IO.File]::WriteAllText($reportPath, $header)
+	$autoStart = Get-Date
+	for ($si = 0; $si -lt $autoStages.Count; $si++)
+	{
+		$stage = $autoStages[$si]
+		Write-Host ("[--auto] [{0}/{1}] {2} ..." -f ($si + 1), $autoStages.Count, $stage)
+		$stageStart = Get-Date
+		$out = Invoke-LadonCaptured @($autoTarget, $stage)
+		$stageSecs = [int]((Get-Date) - $stageStart).TotalSeconds
+		$bannerRe = '^(Ladon 911|Start:|End:|PC Name:|Win Ver:|Runtime:|Build:|OS :|OS:|Machine Make:|Network:|Ping:|RunUser:|PID:|CPU:|FreeSpace:|Threads:|Load |$)'
+		$resultLines = @($out -split "`r?`n" | Where-Object { $_.Trim() -ne '' -and $_ -notmatch $bannerRe }).Count
+		$section = "########## [$($si + 1)/$($autoStages.Count)] $stage  ($autoTarget)  started $($stageStart.ToString('HH:mm:ss'))  ${stageSecs}s  ${resultLines} result lines ##########`n$out`n`n"
+		[IO.File]::AppendAllText($reportPath, $section)
+		Write-Host ("[--auto] [{0}/{1}] {2} done in {3}s ({4} result lines)" -f ($si + 1), $autoStages.Count, $stage, $stageSecs, $resultLines)
+		# Knock phase: after host discovery, knock every live host with the
+		# recommended sequence so knockd-style firewalls open before the
+		# port-scan stages see them.
+		if ($stage -ieq 'OnlinePC' -and $null -ne $autoKnockItems)
+		{
+			$liveHosts = Get-LadonHostsFromScanOutput $out
+			$knockPlan = ($autoKnockItems | ForEach-Object { $_[0] + ':' + $_[1] }) -join ','
+			$kStart = Get-Date
+			$kDelay = 50
+			$kTimeout = 400
+			$kLimit = 128
+			Write-Host ("[--auto] [Knock] {0} live host(s), sequence [{1}] (delay {2}ms, timeout {3}ms)" -f $liveHosts.Count, $knockPlan, $kDelay, $kTimeout)
+			$hostLines = @()
+			$knocked = 0
+			foreach ($h in $liveHosts)
+			{
+				if ($knocked -ge $kLimit)
+				{
+					$hostLines += "... truncated at $kLimit hosts ..."
+					Write-Host "[--auto] [Knock] host limit ($kLimit) reached, remaining hosts skipped"
+					break
+				}
+				$hip = $null
+				try { $hip = [System.Net.IPAddress]::Parse($h) } catch { continue }
+				$stOpen = @(); $stClosed = 0; $stTo = 0; $stErr = 0
+				for ($ki = 0; $ki -lt $autoKnockItems.Count; $ki++)
+				{
+					$st = Send-LadonKnockStep $hip $autoKnockItems[$ki][0] $autoKnockItems[$ki][1] $kTimeout
+					if ($st -like 'connected*') { $stOpen += ($autoKnockItems[$ki][0] + ':' + $autoKnockItems[$ki][1]) }
+					elseif ($st -like 'closed*') { $stClosed++ }
+					elseif ($st -like 'timeout*') { $stTo++ }
+					else { $stErr++ }
+					if ($ki -lt $autoKnockItems.Count - 1) { Start-Sleep -Milliseconds $kDelay }
+				}
+				$parts = @()
+				if ($stClosed) { $parts += "$stClosed closed" }
+				if ($stTo) { $parts += "$stTo timeout" }
+				if ($stErr) { $parts += "$stErr error" }
+				$ksum = "$h  knock sent x$($autoKnockItems.Count)"
+				if ($parts.Count) { $ksum += " (" + ($parts -join ', ') + ")" }
+				if ($stOpen.Count) { $ksum += "  *** OPEN: " + ($stOpen -join ',') + " ***" }
+				$hostLines += $ksum
+				$knocked++
+				Write-Host ("[--auto] [Knock] [{0}/{1}] {2}" -f $knocked, $liveHosts.Count, $ksum)
+			}
+			$kSecs = [int]((Get-Date) - $kStart).TotalSeconds
+			$kHeader = "########## [Knock]  sequence=[$knockPlan]  hosts=$knocked/$($liveHosts.Count)  started $($kStart.ToString('HH:mm:ss'))  ${kSecs}s ##########`n"
+			[IO.File]::AppendAllText($reportPath, $kHeader + ($hostLines -join "`n") + "`n`n")
+		}
+	}
+	$totalSecs = [int]((Get-Date) - $autoStart).TotalSeconds
+	[IO.File]::AppendAllText($reportPath, "=======================`nFinished    : " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "`nTotal time  : ${totalSecs}s`n")
+	Write-Host ""
+	Write-Host "[--auto] Report written to: $reportPath"
+	return
+}
+
+# --knock: port knocking client. Sends a sequence of TCP connects / UDP
+# datagrams to a target (e.g. to trigger a knockd-style firewall opening).
+# Usage: Ladon --knock <ip|host> <port[,port,...]> [delayMs] [timeoutMs]
+#   Per-port protocol prefix u:/udp: or t:/tcp: (default tcp).
+#   e.g.: Ladon --knock 192.168.1.8 7000,8000,9000
+#         Ladon --knock 192.168.1.8 u:7000,t:8000,t:9000 200 1500
+if ($Q7MGIzea -ieq '--knock' -or $Q7MGIzea -ieq '--portknock')
+{
+	if ([String]::IsNullOrEmpty($z9cZmQB) -or [String]::IsNullOrEmpty($z8kaB))
+	{
+		Write-Host "Usage: Ladon --knock <ip|host> <port[,port,...]> [delayMs] [timeoutMs]"
+		Write-Host "       per-port prefix u:/t: selects udp/tcp (default tcp)"
+		Write-Host "       e.g.: Ladon --knock 192.168.1.8 7000,8000,9000"
+		Write-Host "             Ladon --knock 192.168.1.8 u:7000,t:8000,t:9000 200 1500"
+		return
+	}
+	$knockDelay = 200
+	$knockTimeout = 1500
+	if ($Kjeb3g -match '^\d+$') { $knockDelay = [int]$Kjeb3g }
+	if ($z8vie -match '^\d+$') { $knockTimeout = [int]$z8vie }
+	$knockIp = $null
+	try
+	{
+		$resolved = [System.Net.Dns]::GetHostAddresses($z9cZmQB)
+		foreach ($a in $resolved)
+		{
+			if ($a.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) { $knockIp = $a; break }
+		}
+		if ($null -eq $knockIp -and $resolved.Count -gt 0) { $knockIp = $resolved[0] }
+	}
+	catch { }
+	if ($null -eq $knockIp)
+	{
+		Write-Host "[!] --knock: could not resolve '$z9cZmQB'"
+		return
+	}
+	$knockItems = ConvertFrom-LadonKnockSpec $z8kaB
+	if ($null -eq $knockItems)
+	{
+		Write-Host "[!] --knock: invalid port list '$z8kaB'"
+		return
+	}
+	$knockPlan = ($knockItems | ForEach-Object { $_[0] + ':' + $_[1] }) -join ','
+	Write-Host ("[*] Knocking {0} ({1})  sequence=[{2}]  delay={3}ms  timeout={4}ms" -f $z9cZmQB, $knockIp, $knockPlan, $knockDelay, $knockTimeout)
+	for ($ki = 0; $ki -lt $knockItems.Count; $ki++)
+	{
+		$proto = $knockItems[$ki][0]
+		$port = $knockItems[$ki][1]
+		$status = Send-LadonKnockStep $knockIp $proto $port $knockTimeout
+		Write-Host ("[{0}/{1}] {2} {3}:{4}  -> {5}" -f ($ki + 1), $knockItems.Count, $proto, $knockIp, $port, $status)
+		if ($ki -lt $knockItems.Count - 1) { Start-Sleep -Milliseconds $knockDelay }
+	}
+	Write-Host "[*] Knock sequence complete."
+	return
+}
+
+# Auto-CIDR injection: "Ladon OnlinePC" / "Ladon noping OnlinePC" get the local
+# segment resolved robustly and passed explicitly, matching upstream behaviour
+# on machines where the built-in detection works.
+if ($Kjeb3g -eq "" -and $z8kaB -eq "")
+{
+	if ($Q7MGIzea -ne "" -and $z9cZmQB -eq "" -and $LadonSegmentModules -contains $Q7MGIzea.ToLower())
+	{
+		$localCidr = Get-LadonLocalCidr
+		if (-not [String]::IsNullOrEmpty($localCidr))
+		{
+			Write-Host "[*] Local segment detected: $localCidr (auto-resolved; built-in detection failed on this system)"
+			$z9cZmQB = $Q7MGIzea
+			$Q7MGIzea = $localCidr
+		}
+	}
+	elseif ($Q7MGIzea -ieq 'noping' -and $z9cZmQB -ne "" -and $LadonSegmentModules -contains $z9cZmQB.ToLower())
+	{
+		$localCidr = Get-LadonLocalCidr
+		if (-not [String]::IsNullOrEmpty($localCidr))
+		{
+			Write-Host "[*] Local segment detected: $localCidr (auto-resolved; built-in detection failed on this system)"
+			$Kjeb3g = $z9cZmQB
+			$z9cZmQB = $localCidr
+		}
+	}
+}
+
 If([String]::IsNullOrEmpty($bH8T3b)){ If($Q7MGIzea -ne "" -and $z9cZmQB -ne "" -and $z8kaB -ne "" -and $Kjeb3g -ne "" -and $z8vie -ne "" -and $rdX9D -ne "" -and $Df9Dd -ne "" -and $vbtpb -ne ""  ){$Kb82F::Main(@($Q7MGIzea,$z9cZmQB,$z8kaB,$Kjeb3g,$z8vie,$rdX9D,$Df9Dd,$vbtpb))}else{If($Q7MGIzea -ne "" -and $z9cZmQB -ne "" -and $z8kaB -ne "" -and $Kjeb3g -ne "" -and $z8vie -ne "" -and $rdX9D -ne "" -and $Df9Dd -ne "" ){$Kb82F::Main(@($Q7MGIzea,$z9cZmQB,$z8kaB,$Kjeb3g,$z8vie,$rdX9D,$Df9Dd))}else{If($Q7MGIzea -ne "" -and $z9cZmQB -ne "" -and $z8kaB -ne "" -and $Kjeb3g -ne "" -and $z8vie -ne "" -and $rdX9D -ne "" ){$Kb82F::Main(@($Q7MGIzea,$z9cZmQB,$z8kaB,$Kjeb3g,$z8vie,$rdX9D))} else{If($Q7MGIzea -ne "" -and $z9cZmQB -ne "" -and $z8kaB -ne "" -and $Kjeb3g -ne "" -and $z8vie -ne "" ){$Kb82F::Main(@($Q7MGIzea,$z9cZmQB,$z8kaB,$Kjeb3g,$z8vie))} else {If($Q7MGIzea -ne "" -and $z9cZmQB -ne "" -and $z8kaB -ne "" -and $Kjeb3g -ne "" ){$Kb82F::Main(@($Q7MGIzea,$z9cZmQB,$z8kaB,$Kjeb3g))} else {If($Q7MGIzea -ne "" -and $z9cZmQB -ne "" -and $z8kaB -ne "" ){$Kb82F::Main(@($Q7MGIzea,$z9cZmQB,$z8kaB))} else {If($Q7MGIzea -ne "" -and $z9cZmQB -ne "" ){$Kb82F::Main(@($Q7MGIzea,$z9cZmQB))}else {If($Q7MGIzea -ne "" ){$Kb82F::Main(@($Q7MGIzea))}}}}}}}}}
 }
